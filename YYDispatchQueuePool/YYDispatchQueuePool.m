@@ -9,12 +9,45 @@
 //  LICENSE file in the root directory of this source tree.
 //
 
+/** ⚠️⚠️使用方式：⚠️⚠️
+ 
+ #if __has_include("YYDispatchQueuePool.h")
+ #import "YYDispatchQueuePool.h"
+ #endif
+ 
+ #ifdef YYDispatchQueuePool_h
+ static inline dispatch_queue_t YYMemoryCacheGetReleaseQueue() {
+     return YYDispatchQueueGetForQOS(NSQualityOfServiceUtility);
+ }
+ #else
+ static inline dispatch_queue_t YYMemoryCacheGetReleaseQueue() {
+     return dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0);
+ }
+ #endif
+
+ */
+
 #import "YYDispatchQueuePool.h"
 #import <UIKit/UIKit.h>
 #import <libkern/OSAtomic.h>
 
 #define MAX_QUEUE_COUNT 32
 
+/** 根据系统优先级获取dispatch_queue_priority_
+ @param qos 系统优先级
+ @return dispatch_queue_priority_t
+ 
+ NSQualityOfServiceUserInteractive
+                        ：与用户交互的任务，这些任务通常跟UI级别的刷新相关，比如动画，这些任务需要在一瞬间完成
+ NSQualityOfServiceUserInitiated
+                        ：由用户发起的并且需要立即得到结果的任务，比如滑动scroll view时去加载数据用于后续cell的显示，这些任务通常跟后续的用户交互相关，在几秒或者更短的时间内完成
+ NSQualityOfServiceUtility
+                        ：一些可能需要花点时间的任务，这些任务不需要马上返回结果，比如下载的任务，这些任务可能花费几秒或者几分钟的时间
+ NSQualityOfServiceBackground
+                        ：这些任务对用户不可见，比如后台进行备份的操作，这些任务可能需要较长的时间，几分钟甚至几个小时
+ NSQualityOfServiceDefault
+                        ：优先级介于user-initiated 和 utility，当没有 QoS信息时默认使用，开发者不应该使用这个值来设置自己的任务
+ */
 static inline dispatch_queue_priority_t NSQualityOfServiceToDispatchPriority(NSQualityOfService qos) {
     switch (qos) {
         case NSQualityOfServiceUserInteractive: return DISPATCH_QUEUE_PRIORITY_HIGH;
@@ -26,6 +59,12 @@ static inline dispatch_queue_priority_t NSQualityOfServiceToDispatchPriority(NSQ
     }
 }
 
+/**
+ 根据系统优先级获取服务质量
+ 
+ @param qos 系统优先级
+ @return qos_class_t
+ */
 static inline qos_class_t NSQualityOfServiceToQOSClass(NSQualityOfService qos) {
     switch (qos) {
         case NSQualityOfServiceUserInteractive: return QOS_CLASS_USER_INTERACTIVE;
@@ -44,6 +83,15 @@ typedef struct {
     int32_t counter;
 } YYDispatchContext;
 
+
+/**
+ 创建一个线程上下文
+ 
+ @param name 名字
+ @param queueCount 线程数量
+ @param qos 系统优先级
+ @return 上下文
+ */
 static YYDispatchContext *YYDispatchContextCreate(const char *name,
                                                  uint32_t queueCount,
                                                  NSQualityOfService qos) {
@@ -94,12 +142,26 @@ static void YYDispatchContextRelease(YYDispatchContext *context) {
 }
 
 static dispatch_queue_t YYDispatchContextGetQueue(YYDispatchContext *context) {
+                                                //OSAtomicIncrement32：一个自增函数，在库<libkern/OSAtomic.h>中，是线程安全的
     uint32_t counter = (uint32_t)OSAtomicIncrement32(&context->counter);
+                                                // 0++  -> 1  , 1%32 = 1, 于是这里就形成了一个循环取queue_t的操作。
     void *queue = context->queues[counter % context->queueCount];
     return (__bridge dispatch_queue_t)(queue);
 }
 
-
+/**
+ 根据优先级去创建上下文并放到线程上下文数组中
+ 
+ @param qos 系统优先级
+ @return 线程上下文
+ */
+/**
+ context[0]：NSQualityOfServiceDefault                    --- queues[]：存放队列指针数组
+ context[1]                                              |
+ context[2] --： 对应不同优先级 --> YYDispatchContext -----|   为不同优先级创建和 CPU 数量相同的 serial queue
+ context[3]                                              |
+ context[4]                                               --- queueCount：队列个数
+ */
 static YYDispatchContext *YYDispatchContextGetForQOS(NSQualityOfService qos) {
     static YYDispatchContext *context[5] = {0};
     switch (qos) {
@@ -164,7 +226,12 @@ static YYDispatchContext *YYDispatchContextGetForQOS(NSQualityOfService qos) {
         _context = NULL;
     }
 }
-
+/**
+ 初始化一个线程池
+ 
+ @param context 传入线程上下文
+ @return 返回线程池
+ */
 - (instancetype)initWithContext:(YYDispatchContext *)context {
     self = [super init];
     if (!context) return nil;
@@ -173,6 +240,14 @@ static YYDispatchContext *YYDispatchContextGetForQOS(NSQualityOfService qos) {
     return self;
 }
 
+/**
+ 初始化线程池
+ 
+ @param name 传入的名字
+ @param queueCount 传入的线程数量
+ @param qos 传入的优先级
+ @return 线程池
+ */
 - (instancetype)initWithName:(NSString *)name queueCount:(NSUInteger)queueCount qos:(NSQualityOfService)qos {
     if (queueCount == 0 || queueCount > MAX_QUEUE_COUNT) return nil;
     self = [super init];
@@ -186,6 +261,12 @@ static YYDispatchContext *YYDispatchContextGetForQOS(NSQualityOfService qos) {
     return YYDispatchContextGetQueue(_context);
 }
 
+/**
+ 根据优先级创建默认线程池
+ 
+ @param qos 优先级
+ @return 线程池
+ */
 + (instancetype)defaultPoolForQOS:(NSQualityOfService)qos {
     switch (qos) {
         case NSQualityOfServiceUserInteractive: {
